@@ -4,7 +4,7 @@ from gevent import monkey
 
 monkey.patch_all()
 
-from bottle import run, Bottle, GeventServer as server, static_file, view
+from bottle import run, Bottle, static_file, view
 from ueditor import ueditor_bottle
 
 bottle = Bottle()
@@ -23,4 +23,4 @@ def static(filename):
 
 bottle.merge(ueditor_bottle)
 
-run(server=server, app=bottle, host='0.0.0.0', port=8000, reloader=True, debug=True)
+run(server="gevent", app=bottle, host='0.0.0.0', port=8000, reloader=True, debug=True)
