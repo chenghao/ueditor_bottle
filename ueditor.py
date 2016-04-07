@@ -1,26 +1,112 @@
 # coding:utf-8
 __author__ = 'chenghao'
-from bottle import Bottle, request, static_file
+from bottle import Bottle, request, response, static_file
 import os, re, json
-from datetime import datetime
+from upload import Uploader
 
 ueditor_bottle = Bottle()
-config_json = {}
+CONFIG = None
 
 
-@ueditor_bottle.get("/ueditor")
-def ueditor_get():
-	action = request.query.get("action")
-	data = get_json_data(action)
-	return data
+@ueditor_bottle.route('/ueditor', method=['GET', 'POST', 'OPTIONS'])
+def ueditor():
+	"""UEditor文件上传接口
+	config 配置文件
+	result 返回结果
+	"""
+	mimetype = 'application/json'
+	result = {}
+	action = request.query.get('action')
 
+	if action == 'config':
+		get_json_data(action)
+		# 初始化时，返回配置文件给客户端
+		result = CONFIG
+	elif action in ('uploadimage', 'uploadfile', 'uploadvideo'):
+		# 图片、文件、视频上传
+		if action == 'uploadimage':
+			field_name = CONFIG.get('imageFieldName')
+			config = {
+				"pathFormat": CONFIG['imagePathFormat'],
+				"maxSize": CONFIG['imageMaxSize'],
+				"allowFiles": CONFIG['imageAllowFiles']
+			}
+		elif action == 'uploadvideo':
+			field_name = CONFIG.get('videoFieldName')
+			config = {
+				"pathFormat": CONFIG['videoPathFormat'],
+				"maxSize": CONFIG['videoMaxSize'],
+				"allowFiles": CONFIG['videoAllowFiles']
+			}
+		else:
+			field_name = CONFIG.get('fileFieldName')
+			config = {
+				"pathFormat": CONFIG['filePathFormat'],
+				"maxSize": CONFIG['fileMaxSize'],
+				"allowFiles": CONFIG['fileAllowFiles']
+			}
+		if field_name in request.files:
+			field = request.files.getall(field_name)[0]
+			uploader = Uploader(field, config, CONFIG["absolutePath"] if CONFIG["absolutePath"] else os.getcwd())
+			result = uploader.get_file_info()
+		else:
+			result['state'] = '上传接口出错'
+	elif action in ('uploadscrawl'):
+		# 涂鸦上传
+		field_name = CONFIG.get('scrawlFieldName')
+		config = {
+			"pathFormat": CONFIG.get('scrawlPathFormat'),
+			"maxSize": CONFIG.get('scrawlMaxSize'),
+			"allowFiles": CONFIG.get('scrawlAllowFiles'),
+			"oriName": "scrawl.png"
+		}
+		if field_name in request.forms:
+			field = request.forms.get(field_name)
+			uploader = Uploader(field, config, CONFIG["absolutePath"] if CONFIG["absolutePath"] else os.getcwd(), 'base64')
+			result = uploader.get_file_info()
+		else:
+			result['state'] = '上传接口出错'
+	elif action in ('catchimage'):
+		config = {
+			"pathFormat": CONFIG['catcherPathFormat'],
+			"maxSize": CONFIG['catcherMaxSize'],
+			"allowFiles": CONFIG['catcherAllowFiles'],
+			"oriName": "remote.png"
+		}
+		field_name = CONFIG['catcherFieldName']
+		if field_name in request.forms:
+			# 这里比较奇怪，远程抓图提交的表单名称不是这个
+			source = []
+		elif '%s[]' % field_name in request.forms:
+			# 而是这个
+			source = request.forms.getall('%s[]' % field_name)
+		_list = []
+		for imgurl in source:
+			uploader = Uploader(imgurl, config, CONFIG["absolutePath"] if CONFIG["absolutePath"] else os.getcwd(), 'remote')
+			info = uploader.get_file_info()
+			_list.append({
+				'state': info['state'],
+				'url': info['url'],
+				'original': info['original'],
+				'source': imgurl,
+			})
+		result['state'] = 'SUCCESS' if len(_list) > 0 else 'ERROR'
+		result['list'] = _list
+	else:
+		result['state'] = '请求地址出错'
 
-@ueditor_bottle.post("/ueditor")
-def ueditor_post():
-	action = request.query.get("action")
-	files = request.files.getall("upfile")
-	res = dispatch(action, files)
-	return res
+	if 'callback' in request.query:
+		callback = request.args.get('callback')
+		if re.match(r'^[\w_]+$', callback):
+			result = '%s(%s)' % (callback, result)
+			mimetype = 'application/javascript'
+		else:
+			result = {'state': 'callback参数不合法'}
+
+	response.content_type = mimetype
+	response.set_header('Access-Control-Allow-Origin', '*')
+	response.set_header('Access-Control-Allow-Headers', 'X-Requested-With,X_Requested_With')
+	return result
 
 
 @ueditor_bottle.get('/upload/<filename:path>')
@@ -35,112 +121,14 @@ def get_json_data(action):
 	:param action:
 	:return:
 	"""
-	global config_json
+	global CONFIG
 	path = os.path.join(os.path.dirname(__file__), "static/ueditor1_4_3_1-utf8-py/")
 	# 获取json文件的内容, 并把注释替换掉
 	with open(path + "/" + action + ".json", "r") as f:
-		r = re.compile(r"(\/\*[\s\S]+?\*\/)")
-		config_json = r.sub('', f.read())
-	return config_json
+		try:
+			r = re.compile(r"(\/\*[\s\S]+?\*\/)")
+			CONFIG = json.loads(r.sub('', f.read()))
+		except:
+			CONFIG = {}
 
-
-def get_full_name(path_format):
-	now = datetime.now()
-	d = now.strftime("%Y-%y-%m-%d-%H-%M-%S").split("-")
-	path_format = path_format.replace("{yyyy}", d[0])
-	path_format = path_format.replace("{yy}", d[1])
-	path_format = path_format.replace("{mm}", d[2])
-	path_format = path_format.replace("{dd}", d[3])
-	path_format = path_format.replace("{hh}", d[4])
-	path_format = path_format.replace("{ii}", d[5])
-	path_format = path_format.replace("{ss}", d[6])
-	return path_format
-
-
-def create_directory(path):
-	if not os.path.exists(path):
-		os.makedirs(path)
-
-
-def get_path_format(action, obj):
-	if action == "uploadimage":
-		return obj.get("imagePathFormat")
-	elif action == "uploadscrawl":
-		return obj.get("scrawlPathFormat")
-	elif action == "catchimage":
-		return obj.get("catcherPathFormat")
-	elif action == "uploadvideo":
-		return obj.get("videoPathFormat")
-	elif action == "uploadfile":
-		return obj.get("filePathFormat")
-	elif action == "uploadsnapscreen":
-		return obj.get("snapscreenPathFormat")
-	else:
-		return "/ueditor/py/upload/custom"
-
-
-def get_file_path(path_s):
-	return os.getcwd() + path_s
-
-
-def dispatch(action, files):
-	"""
-	任务分发
-	:param action: uploadimage 上传图片, uploadscrawl 上传涂鸦图片, catchimage 上传远程图片, uploadvideo 上传视频,
-					uploadfile 上传文件, uploadsnapscreen 上传屏幕截图
-	:return:
-	"""
-	obj = json.loads(config_json)
-	absolute_path = obj["absolutePath"]  # 绝对路经
-	if absolute_path:  # 使用绝对路经保存
-		create_directory(absolute_path)
-		file_path = absolute_path
-	else:  # 使用相对路经保存
-		path_format = get_full_name(get_path_format(action, obj))
-		path = get_file_path(path_format)
-		create_directory(path)
-		file_path = path
-
-	if action == "uploadimage":
-		res = upload_image(files, obj["imageFieldName"], obj["imageMaxSize"], obj["imageAllowFiles"], file_path,
-						   path_format)
-	elif action == "uploadscrawl":
-		pass
-	elif action == "catchimage":
-		pass
-	elif action == "uploadvideo":
-		pass
-	elif action == "uploadfile":
-		pass
-	elif action == "uploadsnapscreen":
-		pass
-	elif action == "listimage":
-		pass
-	elif action == "listfile":
-		pass
-	else:
-		pass
-
-	return res
-
-
-def upload_image(files, max_size, allow_files, file_path, path_format):
-	res = {}
-	for f in files:
-		file_name = f.filename
-		file_size = os.path.getsize(f.file.name)
-
-		name, ext = os.path.splitext(file_name)
-		if ext not in allow_files:  # 上传的图片格式不正确
-			res['state'] = "上传的图片格式不正确"
-
-		if long(max_size) < file_size:  # 图片太大
-			res['state'] = "图片太大"
-
-		if not res:  # 判断该dict是否为空
-			f.save(file_path, overwrite=True)
-			res["state"] = "SUCCESS"
-			res["url"] = path_format + "/" + file_name
-
-		return res
 
